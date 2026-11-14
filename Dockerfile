@@ -151,8 +151,13 @@ RUN set -eux; \
     ln -s /opt/bbot/bin/bbot /usr/local/bin/bbot; \
     bbot -y --install-all-deps; \
     bbot --version >/dev/null; \
-    bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness >/dev/null 2>&1 || true; \
-    bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness --no-color >/tmp/bbot-dry.log 2>&1 || true; \
+    mods="wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness"; \
+    # gowitness downloads an x86-64-only Chrome, which cannot run in an arm64
+    # image (Apple Silicon): leave it out of the check here. It is pointed at
+    # the native Playwright Chromium and checked after the Playwright install.
+    if [ "${TARGETARCH:-amd64}" = "arm64" ]; then mods="wafw00f,paramminer_getparams,lightfuzz,sslcert"; fi; \
+    bbot --dry-run -t example.com -m "$mods" >/dev/null 2>&1 || true; \
+    bbot --dry-run -t example.com -m "$mods" --no-color >/tmp/bbot-dry.log 2>&1 || true; \
     ! grep -qE "Installing|ERRR|CRITICAL" /tmp/bbot-dry.log || { cat /tmp/bbot-dry.log; exit 1; }
 
 
@@ -169,6 +174,24 @@ RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "@playwright/cli@
     && playwright-cli --help \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
+# bbot's gowitness module (web screenshots) runs the Chrome at
+# ~/.bbot/tools/chrome-linux/chrome, and bbot only downloads an x86-64 build of
+# it. On arm64 (Apple Silicon) that binary cannot run, so replace it with a link
+# to the native Chromium Playwright just installed. bbot hands this exact path
+# to gowitness, so a chromium on PATH would not be enough. amd64 is unchanged.
+# Then check, on every architecture, that the module sets up cleanly.
+RUN set -eux; \
+    if [ "${TARGETARCH:-amd64}" = "arm64" ]; then \
+      pw_chrome="$(find /root/.cache/ms-playwright -type f -name chrome -path '*/chromium-*' | head -n 1)"; \
+      [ -n "$pw_chrome" ] || { echo "no Playwright Chromium found" >&2; exit 1; }; \
+      "$pw_chrome" --version; \
+      rm -rf /root/.bbot/tools/chrome-linux; \
+      mkdir -p /root/.bbot/tools/chrome-linux; \
+      ln -s "$pw_chrome" /root/.bbot/tools/chrome-linux/chrome; \
+    fi; \
+    bbot --dry-run -t example.com -m gowitness --no-color >/tmp/bbot-gowitness.log 2>&1 || true; \
+    ! grep -qE "Installing|ERRR|CRITICAL" /tmp/bbot-gowitness.log || { cat /tmp/bbot-gowitness.log; exit 1; }; \
+    rm -f /tmp/bbot-gowitness.log
 WORKDIR /app
 # Binary compiled from source in the build stage above.
 COPY --from=build /out/artex /app/artex
